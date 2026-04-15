@@ -37,8 +37,8 @@ namespace PrivateLLM
             });
         }
         public Response Call(
+            string SystemPrompt,
             string UserPrompt,
-            string SystemPrompt = "You are a helpful assistant.",
             string ModelFileURL = "",
             string HFAccessToken = "",
             bool UseCustomParameters = false,
@@ -61,9 +61,7 @@ namespace PrivateLLM
                 var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
                 var parameters = new ModelParams(modelPath)
                 {
-                    ContextSize = 512,
-                    UseMemorymap = true,
-                    UseMemoryLock = false,
+                    ContextSize = 1024,
                     GpuLayerCount = 0,
                     Threads = 1
                 };
