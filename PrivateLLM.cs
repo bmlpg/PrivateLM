@@ -1,7 +1,5 @@
-﻿using System;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net.Http.Headers;
-using System.Text;
 using LLama;
 using LLama.Common;
 using LLama.Sampling;
@@ -13,8 +11,6 @@ namespace PrivateLLM
     public class PrivateLLM : IPrivateLLM
     {
         private readonly ILogger _logger;
-
-        private static string currentModelFileURL = "";
 
         public PrivateLLM(ILogger logger)
         {
@@ -62,48 +58,48 @@ namespace PrivateLLM
 
             try
             {
-                response.Result = Task.Run(async () =>
+                var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
+                var parameters = new ModelParams(modelPath)
                 {
-                    var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
-                    var parameters = new ModelParams(modelPath)
+                    ContextSize = 512,
+                    UseMemorymap = true,
+                    UseMemoryLock = false,
+                    GpuLayerCount = 0,
+                    Threads = 1
+                };
+
+                using (var weights = LLamaWeights.LoadFromFile(parameters))
+                {
+                    var executor = new StatelessExecutor(weights, parameters);
+
+                    var history = new ChatHistory();
+                    history.AddMessage(AuthorRole.System, SystemPrompt);
+                    history.AddMessage(AuthorRole.User, UserPrompt);
+                    var transformer = new PromptTemplateTransformer(weights, true);
+                    string fullPrompt = transformer.HistoryToText(history);
+
+                    int maxTokens = 256;
+                    float temperature = 0.1f;
+                    float topP = 0.9f;
+
+                    if (UseCustomParameters)
                     {
-                        ContextSize = 1024,
-                        GpuLayerCount = 0,
-                        Threads = 1
-                    };
-
-                    using (var weights = LLamaWeights.LoadFromFile(parameters))
-                    {
-                        var executor = new StatelessExecutor(weights, parameters);
-
-                        var history = new ChatHistory();
-                        history.AddMessage(AuthorRole.System, SystemPrompt);
-                        history.AddMessage(AuthorRole.User, UserPrompt);
-                        var transformer = new PromptTemplateTransformer(weights, true);
-                        string fullPrompt = transformer.HistoryToText(history);
-
-                        int maxTokens = 512;
-                        float temperature = 0.1f;
-                        float topP = 0.9f;
-
-                        if (UseCustomParameters)
+                        if (CustomParameters != null)
                         {
-                            if (CustomParameters != null)
-                            {
-                                maxTokens = CustomParameters.Value.MaxTokens;
-                                temperature = (float)CustomParameters.Value.Temperature;
-                                topP = (float)CustomParameters.Value.TopP;
-                            }
-
-                            if (maxTokens <= 0) { maxTokens = 512; }
-                            if (topP <= 0) { topP = 1.0f; }
+                            maxTokens = CustomParameters.Value.MaxTokens;
+                            temperature = (float)CustomParameters.Value.Temperature;
+                            topP = (float)CustomParameters.Value.TopP;
                         }
 
-                        var inferenceParams = new InferenceParams()
-                        {
-                            MaxTokens = maxTokens,
-                            // THE UNIVERSAL STOP LIST
-                            AntiPrompts = new List<string>
+                        if (maxTokens <= 0) { maxTokens = 256; }
+                        if (topP <= 0) { topP = 1.0f; }
+                    }
+
+                    var inferenceParams = new InferenceParams()
+                    {
+                        MaxTokens = maxTokens,
+                        // THE UNIVERSAL STOP LIST
+                        AntiPrompts = new List<string>
                             {
                             "<|im_end|>",    // Qwen, SmolLM2, Phi-3/4
                             "<|eot_id|>",    // Llama 3, 3.1, 3.2
@@ -112,16 +108,18 @@ namespace PrivateLLM
                             "User:",           // Generic legacy fallback
                             "\n\n\n"           // 'The Emergency Brake' (Prevents rambling)
                             },
-                            SamplingPipeline = new DefaultSamplingPipeline()
-                            {
-                                Temperature = temperature,
-                                TopP = topP,
-                                RepeatPenalty = 1.1f,
-                                PenalizeNewline = false,
+                        SamplingPipeline = new DefaultSamplingPipeline()
+                        {
+                            Temperature = temperature,
+                            TopP = topP,
+                            RepeatPenalty = 1.1f,
+                            PenalizeNewline = false,
 
-                            }
-                        };
+                        }
+                    };
 
+                    response.Result = Task.Run(async () =>
+                    {
                         var responseBuilder = new System.Text.StringBuilder();
 
                         await foreach (var token in executor.InferAsync(fullPrompt, inferenceParams))
@@ -130,8 +128,10 @@ namespace PrivateLLM
                         }
 
                         return responseBuilder.ToString().Trim();
-                    }
-                }).GetAwaiter().GetResult();
+                    }).GetAwaiter().GetResult();
+
+                }
+
             }
             finally
             {
@@ -151,51 +151,66 @@ namespace PrivateLLM
 
         private void SetupModel(string modelFileURL, string hfAccessToken)
         {
-            if (currentModelFileURL == modelFileURL)
+            string tempFolder = Path.GetTempPath();
+            string modelPath = Path.Combine(tempFolder, "model.gguf");
+            string versionFilePath = Path.Combine(tempFolder, "model.url.txt"); // Our "receipt" file
+            string tempDownloadPath = modelPath + ".tmp";
+
+            // 1. Read the "receipt" from disk to see what we actually have in Temp
+            string storedUrl = "";
+            if (File.Exists(versionFilePath) && File.Exists(modelPath))
             {
-                _logger.LogInformation("Model file URL unchanged, skipping download.");
+                storedUrl = File.ReadAllText(versionFilePath).Trim();
+            }
+
+            // 2. Compare against the requested URL
+            if (storedUrl == modelFileURL)
+            {
+                _logger.LogInformation("Model on disk matches requested URL. Skipping download.");
                 return;
             }
 
-            _logger.LogInformation("Starting atomic model download...");
+            _logger.LogInformation("Model mismatch or missing. Starting atomic download...");
 
-            string filePath = Path.Combine(Path.GetTempPath(), "model.gguf");
-            string tempFilePath = filePath + ".tmp";
-
-            if (File.Exists(filePath)) File.Delete(filePath);
+            // 3. Clean up old files if they exist
+            if (File.Exists(modelPath)) File.Delete(modelPath);
+            if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
 
             try
             {
-                HttpClient client = new HttpClient();
-
-                using var request = new HttpRequestMessage(HttpMethod.Get, modelFileURL);
-                request.Headers.Add("User-Agent", "OutSystems-PrivateLLM-Plugin-ODC");
-
-                if (!string.IsNullOrWhiteSpace(hfAccessToken))
+                using (HttpClient client = new HttpClient())
                 {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", hfAccessToken);
+                    using var request = new HttpRequestMessage(HttpMethod.Get, modelFileURL);
+                    request.Headers.Add("User-Agent", "OutSystems-PrivateLLM-Plugin-ODC");
+
+                    if (!string.IsNullOrWhiteSpace(hfAccessToken))
+                    {
+                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", hfAccessToken);
+                    }
+
+                    using var response = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
+                    response.EnsureSuccessStatusCode();
+
+                    using (var networkStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                    using (var fileStream = new FileStream(tempDownloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        networkStream.CopyTo(fileStream);
+                    }
+
+                    // Move the model into place
+                    File.Move(tempDownloadPath, modelPath);
+
+                    // 4. Update the "receipt" file so the next call knows what this file is
+                    File.WriteAllText(versionFilePath, modelFileURL);
+
+                    _logger.LogInformation("Model download complete and version receipt updated.");
                 }
-
-                using var response = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-                response.EnsureSuccessStatusCode();
-
-                using (var networkStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
-                using (var fileStream = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    networkStream.CopyTo(fileStream);
-                }
-
-                File.Move(tempFilePath, filePath);
-
-                currentModelFileURL = modelFileURL;
-
-                _logger.LogInformation("Model download complete and verified.");
             }
             catch (Exception ex)
             {
                 _logger.LogError($"Download failed: {ex.Message}");
-                // Cleanup temp file on failure so the next attempt starts fresh
-                if (File.Exists(tempFilePath)) File.Delete(tempFilePath);
+                if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
+                if (File.Exists(versionFilePath)) File.Delete(versionFilePath);
                 throw;
             }
         }
