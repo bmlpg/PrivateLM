@@ -45,6 +45,12 @@ namespace PrivateLLM
             CustomParameters? CustomParameters = null
         )
         {
+
+            if((SystemPrompt.Length + UserPrompt.Length) > 1600)
+            {
+                throw new ArgumentException("Input is too long for the current model optimization (Max ~400 words).");
+            }
+
             Stopwatch sw = Stopwatch.StartNew();
 
             if (string.IsNullOrWhiteSpace(ModelFileURL))
@@ -61,7 +67,7 @@ namespace PrivateLLM
                 var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
                 var parameters = new ModelParams(modelPath)
                 {
-                    ContextSize = 1024,
+                    ContextSize = 512,
                     GpuLayerCount = 0,
                     Threads = 1
                 };
