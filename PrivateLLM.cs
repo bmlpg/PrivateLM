@@ -36,115 +36,126 @@ namespace PrivateLLM
                 }
             });
         }
+
         public Response Call(
             string SystemPrompt,
             string UserPrompt,
-            string ModelFileURL = "",
-            string HFAccessToken = "",
             bool UseCustomParameters = false,
-            CustomParameters? CustomParameters = null
+            CustomParameters? CustomParameters = null,
+            string ModelFileURL = "",
+            string HFAccessToken = ""
         )
         {
+            // Re-use BulkCall logic for a single item to ensure identical behavior
 
-            if((SystemPrompt.Length + UserPrompt.Length) > 1600)
+            var singleRequest = new Request
             {
-                throw new ArgumentException("Input is too long for the current model optimization (Max ~400 words).");
-            }
+                SystemPrompt = SystemPrompt,
+                UserPrompt = UserPrompt,
+                CustomParameters = UseCustomParameters ? CustomParameters : null
+            };
 
-            Stopwatch sw = Stopwatch.StartNew();
+            return BulkCall(new List<Request> { singleRequest }, ModelFileURL, HFAccessToken).FirstOrDefault();
+        }
 
-            if (string.IsNullOrWhiteSpace(ModelFileURL))
-            {
-                ModelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_S.gguf";
-            }
-
+        public List<Response> BulkCall(
+            List<Request> Requests,
+            string ModelFileURL = "",
+            string HFAccessToken = ""
+        )
+        {
             DownloadModel(ModelFileURL, HFAccessToken);
+            var results = new List<Response>();
 
-            Response response = new Response();
+            var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
+            var parameters = new ModelParams(modelPath) { ContextSize = 512, GpuLayerCount = 0, Threads = 1 };
 
             try
             {
-                var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
-                var parameters = new ModelParams(modelPath)
-                {
-                    ContextSize = 512,
-                    GpuLayerCount = 0,
-                    Threads = 1
-                };
-
                 using var weights = LLamaWeights.LoadFromFile(parameters);
-                
                 var executor = new StatelessExecutor(weights, parameters);
 
-                var history = new ChatHistory();
-                history.AddMessage(AuthorRole.System, SystemPrompt);
-                history.AddMessage(AuthorRole.User, UserPrompt);
-                var transformer = new PromptTemplateTransformer(weights, true);
-                string fullPrompt = transformer.HistoryToText(history);
-
-                int maxTokens = 256;
-                float temperature = 0.1f;
-                float topP = 0.9f;
-
-                if (UseCustomParameters)
+                foreach (var req in Requests)
                 {
-                    if (CustomParameters != null)
-                    {
-                        maxTokens = CustomParameters.Value.MaxTokens;
-                        temperature = (float)CustomParameters.Value.Temperature;
-                        topP = (float)CustomParameters.Value.TopP;
-                    }
+                    Stopwatch sw = Stopwatch.StartNew();
+                    string result = ExecuteInference(weights, executor, req);
+                    sw.Stop();
 
-                    if (maxTokens <= 0) { maxTokens = 256; }
-                    if (topP <= 0) { topP = 1.0f; }
+                    results.Add(new Response
+                    {
+                        Result = result,
+                        Duration = sw.ElapsedMilliseconds
+                    });
                 }
-
-                var inferenceParams = new InferenceParams()
-                {
-                    MaxTokens = maxTokens,
-                    // THE UNIVERSAL STOP LIST
-                    AntiPrompts = new List<string>
-                        {
-                        "<|im_end|>",    // Qwen, SmolLM2, Phi-3/4
-                        "<|eot_id|>",    // Llama 3, 3.1, 3.2
-                        "<|end_of_text|>", // Standard fallback
-                        "<start_of_turn>", // Gemma 3
-                        "User:",           // Generic legacy fallback
-                        "\n\n\n"           // 'The Emergency Brake' (Prevents rambling)
-                        },
-                    SamplingPipeline = new DefaultSamplingPipeline()
-                    {
-                        Temperature = temperature,
-                        TopP = topP,
-                        RepeatPenalty = 1.1f,
-                        PenalizeNewline = false,
-
-                    }
-                };
-
-                response.Result = Task.Run(async () =>
-                {
-                    var responseBuilder = new System.Text.StringBuilder();
-
-                    await foreach (var token in executor.InferAsync(fullPrompt, inferenceParams))
-                    {
-                        responseBuilder.Append(token);
-                    }
-
-                    return responseBuilder.ToString().Trim();
-                }).GetAwaiter().GetResult();
-
             }
             finally
             {
-                sw.Stop();
-                response.Duration = sw.ElapsedMilliseconds;
-
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
             }
 
-            return response;
+            return results;
+        }
+
+        private string ExecuteInference(LLamaWeights weights, StatelessExecutor executor, Request request)
+        {
+            if ((request.SystemPrompt.Length + request.UserPrompt.Length) > 1600)
+            {
+                throw new ArgumentException("Input is too long for the current model optimization (Max ~400 words).");
+            }
+
+            var history = new ChatHistory();
+            history.AddMessage(AuthorRole.System, request.SystemPrompt);
+            history.AddMessage(AuthorRole.User, request.UserPrompt);
+
+            var transformer = new PromptTemplateTransformer(weights, true);
+            string fullPrompt = transformer.HistoryToText(history);
+
+            int maxTokens = 256;
+            float temperature = 0.1f;
+            float topP = 0.9f;
+
+            if (request.UseCustomParameters)
+            {
+                if (request.CustomParameters != null)
+                {
+                    maxTokens = request.CustomParameters.Value.MaxTokens;
+                    temperature = (float)request.CustomParameters.Value.Temperature;
+                    topP = (float)request.CustomParameters.Value.TopP;
+
+                    if (maxTokens <= 0) { maxTokens = 256; }
+                    if (temperature < 0 || temperature > 1) { temperature = 0.1f; }
+                    if (topP < 0 || topP > 1) { topP = 0.9f; }
+                }
+            }
+
+            // Extract parameters from request or use defaults
+            var inferenceParams = new InferenceParams()
+            {
+                MaxTokens = maxTokens,
+                AntiPrompts = new List<string> { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "<start_of_turn>", "User:", "\n\n\n" },
+                SamplingPipeline = new DefaultSamplingPipeline()
+                {
+                    Temperature = temperature,
+                    TopP = topP,
+                    RepeatPenalty = 1.1f,
+                    PenalizeNewline = false
+                }
+            };
+
+            string result = Task.Run(async () =>
+            {
+                var responseBuilder = new System.Text.StringBuilder();
+
+                await foreach (var token in executor.InferAsync(fullPrompt, inferenceParams))
+                {
+                    responseBuilder.Append(token);
+                }
+
+                return responseBuilder.ToString().Trim();
+            }).GetAwaiter().GetResult();
+
+            return result;
         }
 
         public void Ping()
@@ -153,6 +164,11 @@ namespace PrivateLLM
 
         private void DownloadModel(string modelFileURL, string hfAccessToken)
         {
+            if (string.IsNullOrWhiteSpace(modelFileURL))
+            {
+                modelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_S.gguf";
+            }
+
             string tempFolder = Path.GetTempPath();
             string modelPath = Path.Combine(tempFolder, "model.gguf");
             string versionFilePath = Path.Combine(tempFolder, "model.url.txt"); // Our "receipt" file
