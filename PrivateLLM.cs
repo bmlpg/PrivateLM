@@ -167,7 +167,7 @@ namespace PrivateLLM
         {
             if (string.IsNullOrWhiteSpace(modelFileURL))
             {
-                modelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_S.gguf";
+                modelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q6_K_L.gguf";
             }
 
             string tempFolder = Path.GetTempPath();
