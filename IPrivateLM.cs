@@ -2,8 +2,8 @@
 
 namespace PrivateLLM
 {
-    [OSInterface(Name = "PrivateLLM", Description= "Experimental free and fully local AI for ODC.", IconResourceName = "PrivateLLM.resources.privatellm_logo.png")]
-    public interface IPrivateLLM
+    [OSInterface(Name = "PrivateLLM", Description= "Experimental free and fully local AI for ODC.", IconResourceName = "PrivateLM.resources.privatelm_logo.png")]
+    public interface IPrivateLM
     {
         [OSAction (ReturnName = "Response")]
         public Response Call(

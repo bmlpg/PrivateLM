@@ -7,11 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="resources\privatellm_logo.png" />
+    <None Remove="resources\privatelm_logo.png" />
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="resources\privatellm_logo.png" />
+    <EmbeddedResource Include="resources\privatelm_logo.png" />
   </ItemGroup>
 
   <ItemGroup>

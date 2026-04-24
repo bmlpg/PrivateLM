@@ -8,11 +8,11 @@ using Microsoft.Extensions.Logging;
 
 namespace PrivateLLM
 {
-    public class PrivateLLM : IPrivateLLM
+    public class PrivateLM : IPrivateLM
     {
         private readonly ILogger _logger;
 
-        public PrivateLLM(ILogger logger)
+        public PrivateLM(ILogger logger)
         {
             _logger = logger;
 
@@ -23,7 +23,7 @@ namespace PrivateLLM
 
                 if (!isError && !isWarning) return;
 
-                using var activity = Activity.Current?.Source.StartActivity("PrivateLLM.NativeLog");
+                using var activity = Activity.Current?.Source.StartActivity("PrivateLM.NativeLog");
 
                 if (isError)
                 {
