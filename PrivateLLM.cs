@@ -75,6 +75,16 @@ namespace PrivateLLM
             int Threads = 1
         )
         {
+            if(ContextSize < 128)
+            {
+                throw new ArgumentException("ContextSize must be greater or equal than 128");
+            }
+
+            if(Threads < 1)
+            {
+                throw new ArgumentException("Threads must be greater or equal than 1");
+            }
+
             DownloadModel(ModelFileURL, HFAccessToken);
             var results = new List<Response>();
 
@@ -120,6 +130,21 @@ namespace PrivateLLM
 
         private string ExecuteInference(StatelessExecutor executor, PromptTemplateTransformer transformer, Request request)
         {
+            if(request.Temperature < 0.0f || request.Temperature > 2.0f)
+            {
+                throw new ArgumentException("Temperature must be between 0.0 and 2.0");
+            }
+
+            if(request.MaxTokens < 128)
+            {
+                throw new ArgumentException("MaxTokens must be greated or equal than 128");
+            }
+
+            if(request.TopP <= 0.0f || request.TopP > 1.0f)
+            {
+                throw new ArgumentException("TopP must be between 0.0 (exclusive) and 1.0");
+            }
+
             var history = new ChatHistory();
             history.AddMessage(AuthorRole.System, request.SystemPrompt);
             history.AddMessage(AuthorRole.User, request.UserPrompt);
