@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics;
-using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using LLama;
 using LLama.Common;
@@ -13,9 +12,16 @@ namespace PrivateLLM
     {
         private readonly ILogger _logger;
 
+        private static bool initialized = false;
+
         public PrivateLLM(ILogger logger)
         {
             _logger = logger;
+
+            if (initialized)
+            {
+                return;
+            }
 
             LLama.Native.NativeLibraryConfig.All.WithLogCallback((level, message) =>
             {
@@ -36,6 +42,8 @@ namespace PrivateLLM
                     _logger.LogWarning($"LL# NATIVE WARNING: {message}");
                 }
             });
+
+            initialized = true;
         }
 
         [DllImport("libc")]
@@ -85,15 +93,20 @@ namespace PrivateLLM
                 throw new ArgumentException("Threads must be greater or equal than 1");
             }
 
-            DownloadModel(ModelFileURL, HFAccessToken);
+            
             var results = new List<Response>();
 
             var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
-            var parameters = new ModelParams(modelPath) { ContextSize = (uint?)ContextSize, GpuLayerCount = 0, Threads = Threads };
+            var parameters = new ModelParams(modelPath) {
+                ContextSize = (uint?)ContextSize,
+                GpuLayerCount = 0,
+                Threads = Threads,
+                UseMemorymap = false
+            };
 
             try
             {
-                using var weights = LLamaWeights.LoadFromFile(parameters);
+                var weights = WeightsSingleton.LoadModel(parameters, ModelFileURL ,HFAccessToken);
                 var executor = new StatelessExecutor(weights, parameters);
                 var transformer = new PromptTemplateTransformer(weights, true);
 
@@ -150,6 +163,7 @@ namespace PrivateLLM
             history.AddMessage(AuthorRole.User, request.UserPrompt);
 
             string fullPrompt = transformer.HistoryToText(history);
+            _logger.LogInformation("Executing prompt: " + fullPrompt);
 
             using var pipeline = new DefaultSamplingPipeline()
             {
@@ -162,7 +176,7 @@ namespace PrivateLLM
             var inferenceParams = new InferenceParams()
             {
                 MaxTokens = request.MaxTokens,
-                AntiPrompts = new List<string> { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "<start_of_turn>", "User:", "\n\n\n" },
+                AntiPrompts = new List<string> { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "<start_of_turn>", "User:", "\n\n\n" },                
                 SamplingPipeline = pipeline
             };
 
@@ -173,85 +187,15 @@ namespace PrivateLLM
                 await foreach (var token in executor.InferAsync(fullPrompt, inferenceParams))
                 {
                     responseBuilder.Append(token);
-                }   
+                }
             }).GetAwaiter().GetResult();
 
-            return responseBuilder.ToString().Trim();
+            return responseBuilder.ToString().Trim(); ;
         }
 
         public void Ping()
         {
         }
 
-        private void DownloadModel(string modelFileURL, string hfAccessToken)
-        {
-            if (string.IsNullOrWhiteSpace(modelFileURL))
-            {
-                modelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q6_K_L.gguf";
-            }
-
-            string tempFolder = Path.GetTempPath();
-            string modelPath = Path.Combine(tempFolder, "model.gguf");
-            string versionFilePath = Path.Combine(tempFolder, "model.url.txt"); // Our "receipt" file
-            string tempDownloadPath = modelPath + ".tmp";
-
-            // 1. Read the "receipt" from disk to see what we actually have in Temp
-            string storedUrl = "";
-            if (File.Exists(versionFilePath) && File.Exists(modelPath))
-            {
-                storedUrl = File.ReadAllText(versionFilePath).Trim();
-            }
-
-            // 2. Compare against the requested URL
-            if (storedUrl == modelFileURL)
-            {
-                _logger.LogInformation("Model on disk matches requested URL. Skipping download.");
-                return;
-            }
-
-            _logger.LogInformation("Model mismatch or missing. Starting atomic download...");
-
-            // 3. Clean up old files if they exist
-            if (File.Exists(modelPath)) File.Delete(modelPath);
-            if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
-
-            try
-            {
-                using (HttpClient client = new HttpClient())
-                {
-                    using var request = new HttpRequestMessage(HttpMethod.Get, modelFileURL);
-                    request.Headers.Add("User-Agent", "OutSystems-PrivateLLM-Plugin-ODC");
-
-                    if (!string.IsNullOrWhiteSpace(hfAccessToken))
-                    {
-                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", hfAccessToken);
-                    }
-
-                    using var response = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-                    response.EnsureSuccessStatusCode();
-
-                    using (var networkStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
-                    using (var fileStream = new FileStream(tempDownloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                    {
-                        networkStream.CopyTo(fileStream);
-                    }
-
-                    // Move the model into place
-                    File.Move(tempDownloadPath, modelPath);
-
-                    // 4. Update the "receipt" file so the next call knows what this file is
-                    File.WriteAllText(versionFilePath, modelFileURL);
-
-                    _logger.LogInformation("Model download complete and version receipt updated.");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"Download failed: {ex.Message}");
-                if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
-                if (File.Exists(versionFilePath)) File.Delete(versionFilePath);
-                throw;
-            }
-        }
     }
 }
