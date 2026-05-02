@@ -11,6 +11,12 @@ namespace PrivateLLM
         public long Duration;
         [OSStructureField(DataType = OSDataType.Integer, Description = "Total memory consumption in MB.", IsMandatory = false)]
         public int TotalMemoryMB;
+        [OSStructureField(DataType = OSDataType.Integer, Description = "Time to first token in milliseconds.", IsMandatory = false)]
+        public int TimeToFirstToken;
+        [OSStructureField(DataType = OSDataType.Decimal, Description = "Generation speed in tokens per second.", IsMandatory = false)]
+        public float TokensPerSecond;
+        [OSStructureField(DataType = OSDataType.Integer, Description = "Total number of tokens generated.", IsMandatory = false)]
+        public int TokenCount;
     }
 
     [OSStructure(Description = "")]

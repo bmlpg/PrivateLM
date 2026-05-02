@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using LLama;
 using LLama.Common;
@@ -13,6 +14,12 @@ namespace PrivateLLM
         private readonly ILogger _logger;
 
         private static bool initialized = false;
+
+        private static LLamaWeights? weights;
+
+        private static string currentModelFileURL = "";
+        private static int currentContextSize = 0;
+        private static int currentThreads = 0;
 
         public PrivateLLM(ILogger logger)
         {
@@ -96,34 +103,41 @@ namespace PrivateLLM
             
             var results = new List<Response>();
 
-            var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
-            var parameters = new ModelParams(modelPath) {
-                ContextSize = (uint?)ContextSize,
-                GpuLayerCount = 0,
-                Threads = Threads,
-                UseMemorymap = false
-            };
-
             try
             {
-                var weights = WeightsSingleton.LoadModel(parameters, ModelFileURL ,HFAccessToken);
+                var modelPath = Path.Combine(Path.GetTempPath(), "model.gguf");
+                var parameters = new ModelParams(modelPath)
+                {
+                    ContextSize = (uint?)ContextSize,
+                    GpuLayerCount = 0,
+                    Threads = Threads,
+                    UseMemorymap = false
+                };
+
+                if (currentModelFileURL != ModelFileURL)
+                {
+                    weights?.Dispose();
+                    DownloadModel(ModelFileURL, HFAccessToken);
+                    weights = LLamaWeights.LoadFromFile(parameters);
+                    currentModelFileURL = ModelFileURL;
+                    currentContextSize = ContextSize;
+                    currentThreads = Threads;
+                }
+                else if (currentContextSize != ContextSize || currentThreads != Threads)
+                {
+                    weights?.Dispose();
+                    weights = LLamaWeights.LoadFromFile(parameters);
+                    currentContextSize = ContextSize;
+                    currentThreads = Threads;
+                }
+
                 var executor = new StatelessExecutor(weights, parameters);
                 var transformer = new PromptTemplateTransformer(weights, true);
 
                 foreach (var req in Requests)
                 {
-                    Stopwatch sw = Stopwatch.StartNew();
-                    string result = ExecuteInference(executor, transformer, req);
-                    sw.Stop();
-                    var process = Process.GetCurrentProcess();
-                    process.Refresh();
-
-                    results.Add(new Response
-                    {
-                        Result = result,
-                        Duration = sw.ElapsedMilliseconds,
-                        TotalMemoryMB = (int)(process.WorkingSet64 / (1024 * 1024))
-                    });
+                    Response result = ExecuteInference(executor, transformer, req);
+                    results.Add(result);
                 }
             }
             finally
@@ -141,7 +155,7 @@ namespace PrivateLLM
             return results;
         }
 
-        private string ExecuteInference(StatelessExecutor executor, PromptTemplateTransformer transformer, Request request)
+        private Response ExecuteInference(StatelessExecutor executor, PromptTemplateTransformer transformer, Request request)
         {
             if(request.Temperature < 0.0f || request.Temperature > 2.0f)
             {
@@ -181,16 +195,89 @@ namespace PrivateLLM
             };
 
             var responseBuilder = new System.Text.StringBuilder();
+            int tokenCount = 0;
+            long ttft = 0;
+
+            Stopwatch sw = Stopwatch.StartNew();
 
             Task.Run(async () =>
             {
                 await foreach (var token in executor.InferAsync(fullPrompt, inferenceParams))
                 {
+                    if (tokenCount == 0)
+                    {
+                        ttft = sw.ElapsedMilliseconds; // Capture Time to First Token
+                    }
                     responseBuilder.Append(token);
+                    tokenCount++;
                 }
             }).GetAwaiter().GetResult();
 
-            return responseBuilder.ToString().Trim(); ;
+            sw.Stop();
+
+            // Calculate TPS: Total tokens divided by the time spent generating (Total - TTFT)
+            double generationTimeSec = (sw.ElapsedMilliseconds - ttft) / 1000.0;
+            float tps = generationTimeSec > 0 ? (float)Math.Round(tokenCount / generationTimeSec, 2) : 0;
+
+            var process = Process.GetCurrentProcess();
+            process.Refresh();
+
+            return new Response
+            {
+                Result = responseBuilder.ToString().Trim(),
+                Duration = sw.ElapsedMilliseconds,
+                TimeToFirstToken = (int)ttft,
+                TokensPerSecond = tps,
+                TokenCount = tokenCount,
+                TotalMemoryMB = (int)(process.WorkingSet64 / (1024 * 1024))
+            };
+        }
+
+        private void DownloadModel(string modelFileURL, string hfAccessToken)
+        {
+            if (string.IsNullOrWhiteSpace(modelFileURL))
+            {
+                modelFileURL = "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q6_K_L.gguf";
+            }
+
+            string tempFolder = Path.GetTempPath();
+            string modelPath = Path.Combine(tempFolder, "model.gguf");
+            string tempDownloadPath = modelPath + ".tmp";
+
+            // 3. Clean up old files if they exist
+            if (File.Exists(modelPath)) File.Delete(modelPath);
+            if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
+
+            try
+            {
+                using (HttpClient client = new HttpClient())
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, modelFileURL);
+                    request.Headers.Add("User-Agent", "OutSystems-PrivateLLM-Plugin-ODC");
+
+                    if (!string.IsNullOrWhiteSpace(hfAccessToken))
+                    {
+                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", hfAccessToken);
+                    }
+
+                    using var response = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
+                    response.EnsureSuccessStatusCode();
+
+                    using (var networkStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                    using (var fileStream = new FileStream(tempDownloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        networkStream.CopyTo(fileStream);
+                    }
+
+                    // Move the model into place
+                    File.Move(tempDownloadPath, modelPath);
+                }
+            }
+            catch (Exception)
+            {
+                if (File.Exists(tempDownloadPath)) File.Delete(tempDownloadPath);
+                throw;
+            }
         }
 
         public void Ping()
